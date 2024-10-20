@@ -155,6 +155,7 @@ func (ctx *Context) Loop() {
 	// Channel initiation
 	var feed = make(chan image.Image)
 	var signals = make(chan os.Signal, 1)
+	firstFrame := true
 	defer close(signals)
 	defer close(feed)
 	signal.Notify(signals, os.Interrupt, syscall.SIGWINCH)
@@ -179,20 +180,29 @@ func (ctx *Context) Loop() {
 			}
 			continue
 		// Frames
-		case buf := <-feed:
-			// stop at the end of stream
-			if buf == nil {
-				return
-			}
-			str, err := ctx.renderer.Render(buf)
-			if err != nil {
-				fmt.Fprint(os.Stderr, err)
-				return
-			}
-			internal.SetCursorPos(0, 0)
-			fmt.Fprintf(os.Stdout, str)
-		}
-	}
+        case buf := <-feed:
+            // stop at the end of stream
+            if buf == nil {
+                return
+            }
+            if firstFrame {
+                // Send SIGUSR1 to the Python script
+                fmt.Printf("Sending SIGUSR1 to PID %d\n", pythonPID)
+                err := syscall.Kill(pythonPID, syscall.SIGUSR1)
+                if err != nil {
+                    fmt.Fprintf(os.Stderr, "Failed to send SIGUSR1: %v\n", err)
+                }
+                firstFrame = false
+            }
+            str, err := ctx.renderer.Render(buf)
+            if err != nil {
+                fmt.Fprint(os.Stderr, err)
+                return
+            }
+            internal.SetCursorPos(0, 0)
+            fmt.Fprintf(os.Stdout, str)
+        }
+    }
 }
 
 /*
@@ -239,29 +249,44 @@ Options:
 	return fs, option
 }
 
+var pythonPID int
+
 func main() {
-	fs, options := FlagSet()
-	if len(os.Args) < 2 {
-		fs.Usage()
-	}
-	fs.Parse(os.Args[2:])
+    fs, options := FlagSet()
+    if len(os.Args) < 3 {
+        fmt.Fprintf(os.Stderr, "Usage: %s [FILE] [PID] [OPTIONS]...\n", os.Args[0])
+        os.Exit(1)
+    }
+    filename := os.Args[1]
+    pidStr := os.Args[2]
+    pid, err := strconv.Atoi(pidStr)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Invalid PID: %v\n", err)
+        os.Exit(1)
+    }
+    pythonPID = pid
+    fs.Parse(os.Args[3:])
 
-	ctx := NewContext(os.Args[1], *options)
+    fmt.Printf("Go program PID: %d, Parent PID: %d\n", os.Getpid(), os.Getppid())
+    fmt.Printf("Python script PID (from argument): %d\n", pythonPID)
 
-	err := ctx.Load()
-	if err != nil {
-		fmt.Fprint(os.Stderr, err, "\n")
-		os.Exit(1)
-	}
+    ctx := NewContext(filename, *options)
 
-	// TTY setup
-	internal.ClearScreen()
-	internal.Cursor(false)
-	internal.SetCursorPos(0, 0)
-	defer internal.Cursor(true)
+    err = ctx.Load()
+    if err != nil {
+        fmt.Fprint(os.Stderr, err, "\n")
+        os.Exit(1)
+    }
 
-	ctx.Loop()
+    // TTY setup
+    internal.ClearScreen()
+    internal.Cursor(false)
+    internal.SetCursorPos(0, 0)
+    defer internal.Cursor(true)
+
+    ctx.Loop()
 }
+
 
 /*
 4x8
